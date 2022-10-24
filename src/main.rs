@@ -1,4 +1,5 @@
 use pprof::protos::Message;
+use std::io;
 use std::task::{Context, Poll};
 use std::{thread, time};
 
@@ -9,6 +10,7 @@ use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::service::Service;
 use hyper::{Body, Request, Response, Server};
 use hyper_routing::{Route, RouterBuilder, RouterService};
+use libflate::gzip::Encoder;
 
 pub struct MakeSvc;
 
@@ -39,11 +41,6 @@ fn pprof_handler(request: Request<Body>) -> Response<Body> {
 
     let guard = pprof::ProfilerGuard::new(1_000_000).unwrap();
 
-    // we need to do some work to get some samples
-    thread::spawn(|| {
-        work(10_000);
-    });
-
     thread::sleep(duration);
 
     let mut body = Vec::new();
@@ -52,10 +49,15 @@ fn pprof_handler(request: Request<Body>) -> Response<Body> {
         profile.write_to_vec(&mut body).unwrap();
     }
 
+    // gzip profile
+    let mut encoder = Encoder::new(Vec::new()).unwrap();
+    io::copy(&mut &body[..], &mut encoder).unwrap();
+    let gzip_body = encoder.finish().into_result().unwrap();
+
     Response::builder()
-        .header(CONTENT_LENGTH, body.len() as u64)
+        .header(CONTENT_LENGTH, gzip_body.len() as u64)
         .header(CONTENT_TYPE, "application/octet-stream")
-        .body(Body::from(body))
+        .body(Body::from(gzip_body))
         .unwrap()
 }
 
@@ -78,8 +80,6 @@ fn router_service() -> RouterService {
 }
 
 fn work(to: i64) {
-    info!("find primes 1 to {}", to);
-
     let mut found: i64 = 0; // Set found count to 0
 
     for count in 1i64..to {
@@ -89,10 +89,10 @@ fn work(to: i64) {
             if check_prime(&count) {
                 // Check if odd number if prime, using check_prime
                 found = add(found, 1); // Increment found count
-                info!("{},{}", &count, &found); // Print number, and total found
             }
         }
     }
+    info!("there are {} prime numbers from 1 to {}", &found, to); // Print number, and total found
 
     fn check_prime(count: &i64) -> bool {
         // Function recieves int, and returns bool
@@ -124,8 +124,13 @@ async fn main() {
     let addr = "0.0.0.0:3000".parse().unwrap();
 
     let server = Server::bind(&addr).serve(MakeSvc);
-
     info!("serving at {}", addr);
+
+    // we need to do some work to get some samples
+    thread::spawn(|| loop {
+        work(10_000);
+        thread::sleep(time::Duration::from_millis(500));
+    });
 
     // Run this server for... forever!
     if let Err(e) = server.await {
